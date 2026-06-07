@@ -1,49 +1,197 @@
-'use client';
+"use client";
 
-import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
-import 'leaflet/dist/leaflet.css';
-import { FaskesData } from '../lib/utils';
+import { useEffect, useMemo, useRef, useState } from "react";
+import { MapContainer, GeoJSON } from "react-leaflet";
+import L from "leaflet";
+import { getProcessedData, FaskesData } from "@/lib/utils";
 
-export default function MapInteractive({ data }: { data: FaskesData[] }) {
-  return (
-    <MapContainer 
-      center={[-7.6, 112.7]} 
-      zoom={8} 
-      style={{ height: '100%', width: '100%', borderRadius: '0.75rem', zIndex: 0 }}
-    >
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-      />
-      
-      {data.map((daerah) => (
-        <CircleMarker
-          key={daerah.id}
-          center={[daerah.lat, daerah.lng]}
-          radius={Math.max(daerah.totalFaskes / 100, 8)} // Ukuran radius dinamis berdasarkan jumlah faskes
-          pathOptions={{
-            color: daerah.status === 'Tercukupi' ? '#10b981' : '#ef4444', // Hijau jika cukup, Merah jika kurang
-            fillColor: daerah.status === 'Tercukupi' ? '#34d399' : '#f87171',
-            fillOpacity: 0.6,
-          }}
-        >
-          <Popup>
-            <div className="font-sans">
-              <h3 className="font-bold text-lg">{daerah.kabupatenKota}</h3>
-              <div className="mt-2 text-sm space-y-1">
-                <p><strong>Total Faskes:</strong> {daerah.totalFaskes.toLocaleString('id-ID')}</p>
-                <p><strong>Penduduk:</strong> {daerah.penduduk.toLocaleString('id-ID')}</p>
-                <p><strong>Rasio:</strong> {daerah.rasio.toFixed(2)} faskes/1000 jiwa</p>
-                <div className={`mt-2 inline-block px-2 py-1 rounded text-white font-semibold ${
-                  daerah.status === 'Tercukupi' ? 'bg-emerald-500' : 'bg-red-500'
-                }`}>
-                  {daerah.status}
-                </div>
-              </div>
+const JAWA_TIMUR_GEOJSON_URL = "/jawatimur.json";
+
+// Helper khusus untuk membedakan Kabupaten dan Kota dari GeoJSON
+const getRegionName = (feature: any) => {
+  const name = feature.properties.NAME_2;
+  const type = feature.properties.TYPE_2; // Biasanya berisi "Kabupaten" atau "Kota"
+  const engType = feature.properties.ENGTYPE_2; // Cadangan jika TYPE_2 kosong
+
+  const isKota = type === "Kota" || type === "Kotamadya" || engType === "City";
+
+  if (isKota) {
+    // Jika tipenya Kota tapi namanya belum ada embel-embel "Kota", kita tambahkan
+    return name.toLowerCase().startsWith("kota") ? name : `Kota ${name}`;
+  }
+
+  // Jika Kabupaten, kembalikan nama aslinya (misal: "Kediri", "Malang")
+  return name;
+};
+
+export default function MapInteractive({ data }: { data?: FaskesData[] }) {
+  const [geoJsonData, setGeoJsonData] = useState<any | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+
+  const faskesData = useMemo(() => data ?? getProcessedData(), [data]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch(JAWA_TIMUR_GEOJSON_URL)
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Gagal load file geojson lokal");
+        return res.json();
+      })
+      .then((geoJson) => {
+        geoJson.features.sort((a: any, b: any) => {
+          const isKotaA =
+            a.properties.TYPE_2 === "Kota" || a.properties.ENGTYPE_2 === "City";
+          const isKotaB =
+            b.properties.TYPE_2 === "Kota" || b.properties.ENGTYPE_2 === "City";
+          if (isKotaA && !isKotaB) return 1;
+          if (!isKotaA && isKotaB) return -1;
+          return 0;
+        });
+
+        if (!cancelled) setGeoJsonData(geoJson);
+      })
+      .catch((error) => console.error("Error fetching GeoJSON:", error));
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !geoJsonData) return;
+
+    const coords: [number, number][] = [];
+    const processCoords = (c: any) => {
+      if (Array.isArray(c) && typeof c[0] === "number" && typeof c[1] === "number") {
+        coords.push([c[1], c[0]]);
+      } else if (Array.isArray(c)) {
+        c.forEach(processCoords);
+      }
+    };
+
+    geoJsonData.features.forEach((feature: any) => {
+      const g: any = feature.geometry;
+      if (g?.coordinates) processCoords(g.coordinates);
+    });
+
+    if (coords.length === 0) return;
+
+    const bounds = L.latLngBounds(coords);
+    if (!bounds.isValid()) return;
+
+    try {
+      map.invalidateSize();
+      map.fitBounds(bounds, { padding: [20, 20] });
+    } catch (error) {
+      console.error("Error fitting bounds:", error);
+    }
+  }, [geoJsonData]);
+
+  const getColor = (rasio: number) => {
+    return rasio >= 1.5
+      ? "#10b981"
+      : rasio >= 1.0
+        ? "#34d399"
+        : rasio >= 0.8
+          ? "#fbbf24"
+          : rasio >= 0.5
+            ? "#f87171"
+            : "#ef4444";
+  };
+
+  const geoJsonStyle = (feature: any) => {
+    const regionName = getRegionName(feature);
+
+    // PENTING: Mencocokkan dengan properti kabupatenKota (bukan kabupatenKotaBersih)
+    const data = faskesData.find((d) => d.kabupatenKota === regionName);
+
+    const rasio = data ? data.rasio : 0;
+
+    return {
+      fillColor: getColor(rasio),
+      weight: 1.5,
+      opacity: 1,
+      color: "#ffffff",
+      dashArray: "3",
+      fillOpacity: 0.85,
+    };
+  };
+
+  const onEachFeature = (feature: any, layer: any) => {
+    const regionName = getRegionName(feature);
+    const data = faskesData.find((d) => d.kabupatenKota === regionName);
+
+    if (data) {
+      const tooltipContent = `
+        <div class="text-left font-sans">
+          <strong class="block text-slate-900 mb-1">${data.kabupatenKota}</strong>
+          <div class="text-[11px] text-slate-500 uppercase tracking-[0.12em] mb-1">
+            Rasio Kapasitas
+          </div>
+          <div class="text-lg font-bold ${data.rasio >= 1 ? "text-emerald-600" : "text-rose-500"}">
+            ${data.rasio.toFixed(2)}
+          </div>
+          <span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+            data.status === "Tercukupi"
+              ? "bg-emerald-100 text-emerald-700"
+              : "bg-rose-100 text-rose-700"
+          }">
+            ${data.status}
+          </span>
+          ${
+            data.rekomendasi
+              ? `
+            <div class="mt-2 text-[11px] text-slate-600">
+              <span class="font-semibold">Rekomendasi:</span><br />
+              ${data.rekomendasi}
             </div>
-          </Popup>
-        </CircleMarker>
-      ))}
+          `
+              : ""
+          }
+        </div>
+      `;
+      try {
+        layer.bindTooltip(tooltipContent, {
+          sticky: true,
+          className: "leaflet-tooltip-custom",
+          opacity: 0.95,
+        });
+      } catch (error) {
+        console.error("Tooltip binding failed:", error);
+      }
+
+      layer.on({
+        mouseover: (e: any) => {
+          const target = e.target;
+          target.setStyle({ weight: 3, color: "#1e293b", fillOpacity: 1 });
+          target.bringToFront();
+        },
+        mouseout: (e: any) => {
+          e.target.setStyle(geoJsonStyle(feature));
+        },
+      });
+    }
+  };
+
+  return (
+    <MapContainer
+      center={[-7.6, 112.7]}
+      zoom={8}
+      zoomControl={false}
+      ref={mapRef}
+      style={{
+        height: "100%",
+        width: "100%",
+        borderRadius: "0.75rem",
+        zIndex: 0,
+        backgroundColor: "#020617",
+      }}
+    >
+      {geoJsonData && (
+        <GeoJSON data={geoJsonData} style={geoJsonStyle} onEachFeature={onEachFeature} />
+      )}
     </MapContainer>
   );
 }
