@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, GeoJSON } from "react-leaflet";
 import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import { getProcessedData, FaskesData } from "@/lib/utils";
 
 const JAWA_TIMUR_GEOJSON_URL = "/jawatimur.json";
@@ -25,12 +26,21 @@ const getRegionName = (feature: any) => {
 };
 
 export default function MapInteractive({ data }: { data?: FaskesData[] }) {
-  const [geoJsonData, setGeoJsonData] = useState<any | null>(null);
+  const [isMounted, setIsMounted] = useState(false);
+  const [geoJsonData, setGeoJsonData] =
+    useState<GeoJSON.FeatureCollection | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const [mapReady, setMapReady] = useState(false);
 
   const faskesData = useMemo(() => data ?? getProcessedData(), [data]);
 
   useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isMounted) return;
+
     let cancelled = false;
 
     fetch(JAWA_TIMUR_GEOJSON_URL)
@@ -56,22 +66,26 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isMounted]);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !geoJsonData) return;
+    if (!mapReady || !geoJsonData || !mapRef.current) return;
 
+    const mapInstance = mapRef.current;
     const coords: [number, number][] = [];
     const processCoords = (c: any) => {
-      if (Array.isArray(c) && typeof c[0] === "number" && typeof c[1] === "number") {
+      if (
+        Array.isArray(c) &&
+        typeof c[0] === "number" &&
+        typeof c[1] === "number"
+      ) {
         coords.push([c[1], c[0]]);
       } else if (Array.isArray(c)) {
         c.forEach(processCoords);
       }
     };
 
-    geoJsonData.features.forEach((feature: any) => {
+    geoJsonData.features.forEach((feature) => {
       const g: any = feature.geometry;
       if (g?.coordinates) processCoords(g.coordinates);
     });
@@ -81,13 +95,18 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
     const bounds = L.latLngBounds(coords);
     if (!bounds.isValid()) return;
 
-    try {
-      map.invalidateSize();
-      map.fitBounds(bounds, { padding: [20, 20] });
-    } catch (error) {
-      console.error("Error fitting bounds:", error);
-    }
-  }, [geoJsonData]);
+    const fitMap = () => {
+      if (!mapInstance || !mapInstance.getContainer()) return;
+      try {
+        mapInstance.invalidateSize();
+        mapInstance.fitBounds(bounds, { padding: [20, 20] });
+      } catch (error) {
+        console.error("Error fitting bounds:", error);
+      }
+    };
+
+    mapInstance.whenReady(fitMap);
+  }, [geoJsonData, mapReady]);
 
   const getColor = (rasio: number) => {
     return rasio >= 1.5
@@ -119,7 +138,7 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
     };
   };
 
-  const onEachFeature = (feature: any, layer: any) => {
+  const onEachFeature = (feature: any, layer: L.Layer) => {
     const regionName = getRegionName(feature);
     const data = faskesData.find((d) => d.kabupatenKota === regionName);
 
@@ -140,6 +159,7 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
           }">
             ${data.status}
           </span>
+          
           ${
             data.rekomendasi
               ? `
@@ -163,17 +183,25 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
       }
 
       layer.on({
-        mouseover: (e: any) => {
+        mouseover: (e) => {
           const target = e.target;
           target.setStyle({ weight: 3, color: "#1e293b", fillOpacity: 1 });
           target.bringToFront();
         },
-        mouseout: (e: any) => {
+        mouseout: (e) => {
           e.target.setStyle(geoJsonStyle(feature));
         },
       });
     }
   };
+
+  if (!isMounted) {
+    return (
+      <div className="h-full w-full bg-slate-100 animate-pulse rounded-xl flex items-center justify-center text-slate-400">
+        Menyiapkan Peta Interaktif...
+      </div>
+    );
+  }
 
   return (
     <MapContainer
@@ -181,6 +209,7 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
       zoom={8}
       zoomControl={false}
       ref={mapRef}
+      whenReady={() => setMapReady(true)}
       style={{
         height: "100%",
         width: "100%",
@@ -189,8 +218,12 @@ export default function MapInteractive({ data }: { data?: FaskesData[] }) {
         backgroundColor: "#020617",
       }}
     >
-      {geoJsonData && (
-        <GeoJSON data={geoJsonData} style={geoJsonStyle} onEachFeature={onEachFeature} />
+      {mapReady && geoJsonData && (
+        <GeoJSON
+          data={geoJsonData}
+          style={geoJsonStyle}
+          onEachFeature={onEachFeature}
+        />
       )}
     </MapContainer>
   );
